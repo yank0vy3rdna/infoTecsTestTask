@@ -1,21 +1,34 @@
 from flask import Flask, jsonify, abort, request, make_response, url_for
-from flask_httpauth import HTTPBasicAuth
+import csv, arrow
+
+fields = ['geonameid', 'name', 'asciiname', 'alternatenames',
+          'latitude', 'longitude', 'feature class', 'feature code',
+          'country code', 'cc2', 'admin1 code', 'admin2 code', 'admin3 code',
+          'admin4 code', 'population', 'elevation', 'dem', 'timezone', 'modification date']
+
+reader = csv.DictReader(open('RU.txt', 'r'), fieldnames=fields, delimiter='\t')
+
+towns = [dict(row) for row in reader]
+
+
+def sort_by_population(x):
+    return x['population']
+
+
+def find_town_by_name(name):
+    res = sorted(list(filter(lambda x: x['name'] == str(name), towns)), key=sort_by_population, reverse=True)
+    if len(res) == 0:
+        abort(404)
+    return res[0]
+
+
+def find_town_by_id(geonameid):
+    if len(list(filter(lambda x: x['geonameid'] == str(geonameid), towns))) == 0:
+        abort(404)
+    return list(filter(lambda x: x['geonameid'] == str(geonameid), towns))[0]
+
 
 app = Flask(__name__, static_url_path="")
-auth = HTTPBasicAuth()
-
-
-@auth.get_password
-def get_password(username):
-    if username == 'miguel':
-        return 'python'
-    return None
-
-
-@auth.error_handler
-def unauthorized():
-    return make_response(jsonify({'error': 'Unauthorized access'}), 403)
-    # return 403 instead of 401 to prevent browsers from displaying the default auth dialog
 
 
 @app.errorhandler(400)
@@ -28,91 +41,36 @@ def not_found(error):
     return make_response(jsonify({'error': 'Not found'}), 404)
 
 
-tasks = [
-    {
-        'id': 1,
-        'title': u'Buy groceries',
-        'description': u'Milk, Cheese, Pizza, Fruit, Tylenol',
-        'done': False
-    },
-    {
-        'id': 2,
-        'title': u'Learn Python',
-        'description': u'Need to find a good Python tutorial on the web',
-        'done': False
-    }
-]
+@app.route('/geonames/api/v1.0/gettowninfo/<int:geonameid>', methods=['GET'])
+def get_town_info(geonameid):
+    return jsonify(find_town_by_id(geonameid))
 
 
-def make_public_task(task):
-    new_task = {}
-    for field in task:
-        if field == 'id':
-            new_task['uri'] = url_for('get_task', task_id=task['id'], _external=True)
-        else:
-            new_task[field] = task[field]
-    return new_task
-
-
-@app.route('/todo/api/v1.0/tasks', methods=['GET'])
-@auth.login_required
-def get_tasks():
-    return jsonify({'tasks': map(make_public_task, tasks)})
-
-
-@app.route('/todo/api/v1.0/tasks/<int:task_id>', methods=['GET'])
-@auth.login_required
-def get_task(task_id):
-    task = filter(lambda t: t['id'] == task_id, tasks)
-    if len(task) == 0:
-        abort(404)
-    return jsonify({'task': make_public_task(task[0])})
-
-
-@app.route('/todo/api/v1.0/tasks', methods=['POST'])
-@auth.login_required
-def create_task():
-    if not request.json or not 'title' in request.json:
+@app.route('/geonames/api/v1.0/getpage', methods=['GET'])
+def get_page():
+    page = int(request.args.get('page'))
+    count = int(request.args.get('count'))
+    if len(towns) < page * count:
         abort(400)
-    task = {
-        'id': tasks[-1]['id'] + 1,
-        'title': request.json['title'],
-        'description': request.json.get('description', ""),
-        'done': False
-    }
-    tasks.append(task)
-    return jsonify({'task': make_public_task(task)}), 201
+    return jsonify(towns[(page - 1) * count:page * count])
 
 
-@app.route('/todo/api/v1.0/tasks/<int:task_id>', methods=['PUT'])
-@auth.login_required
-def update_task(task_id):
-    task = filter(lambda t: t['id'] == task_id, tasks)
-    if len(task) == 0:
-        abort(404)
-    if not request.json:
-        abort(400)
-    if 'title' in request.json and type(request.json['title']) != unicode:
-        abort(400)
-    if 'description' in request.json and type(request.json['description']) is not unicode:
-        abort(400)
-    if 'done' in request.json and type(request.json['done']) is not bool:
-        abort(400)
-    task[0]['title'] = request.json.get('title', task[0]['title'])
-    task[0]['description'] = request.json.get('description', task[0]['description'])
-    task[0]['done'] = request.json.get('done', task[0]['done'])
-    return jsonify({'task': make_public_task(task[0])})
+@app.route('/geonames/api/v1.0/compare', methods=['GET'])
+def compare():
+    name1 = request.args.get('name1')
+    name2 = request.args.get('name2')
+    print(name2)
+    town1 = find_town_by_name(name1)
+    town2 = find_town_by_name(name2)
+    same_timezone = town1['timezone'] == town2['timezone']
+    utc = arrow.utcnow()
+    timezones_difference = ':'.join(str((utc.to(town2['timezone'])-utc.to(town1['timezone']))).split(':')[:2])
+    north_town_name = town1['name'] if float(town1['latitude']) > float(town2['latitude']) else town2['name']
+    return jsonify({'town1': town1,
+                    'town2': town2,
+                    'diff': {'same_timezone': same_timezone, 'north_town_name': north_town_name,'timezones_difference': timezones_difference}})
 
 
-@app.route('/todo/api/v1.0/tasks/<int:task_id>', methods=['DELETE'])
-@auth.login_required
-def delete_task(task_id):
-    task = filter(lambda t: t['id'] == task_id, tasks)
-    if len(task) == 0:
-        abort(404)
-    tasks.remove(task[0])
-    return jsonify({'result': True})
-
-
+app.config['JSON_AS_ASCII'] = False
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
